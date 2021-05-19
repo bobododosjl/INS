@@ -14,7 +14,7 @@
 
 ​        陀螺仪或加速度计输出中的常值漂移，即bias。以陀螺仪为例，角速度输入为零时，陀螺仪的输出是一条复合白噪声信号缓           
 
-慢变化的曲线，曲线的平均值就是零偏值。
+![image-20210517155036522](images/image-20210517155036522.png)慢变化的曲线，曲线的平均值就是零偏值。
 
 *误差特性：*
 
@@ -370,11 +370,523 @@ Allan方差分析的是静态误差，陀螺仪必须在静基座下进行采集
 
 ## PSINS代码解析
 
-*1,粗对准&精对准*
+*1,glvf*
 
-*2,惯性解算*
+通过对PSINS工具箱的全局变量进行初始化
+
+```matlab
+function glv1 = glvf(Re, f, wie)
+% PSINS Toolbox global variable structure initialization.
+%
+% Prototype: glv = glvf(Re, f, wie)
+% Inputs: Re - the Earth's semi-major axis 输入：地球半主轴
+%               f - flattening 扁率
+%               wie - the Earth's angular rate  地球自转角速率
+% Output: glv1 - output global variable structure array 输出：全局变量结构数组glvf 's subfunction:
+```
+
+```matlab
+ function eth = earth(pos, vn)
+% Calculate the Earth related parameters.
+%
+% Prototype: eth = earth(pos, vn)
+% Inputs: pos - geographic position [lat;lon;hgt]输入：经度，纬度，高度
+%               vn - velocity 速度
+% Outputs: eth - parameter structure array 地球相关参数结构数组
+```
+
+*2,粗对准&精对准*
+
+*（1）坐标系*
+
+导航坐标系：东-北-天
+
+载体坐标系：右-前-上
+
+*（2）对准条件*
+
+​        初始对准一般是在运载体对地静止的环境下进行，即运载体相对地面既没有明显的线运动也没有角运动，且对准地点处的
+
+地理位置准确已知，即重力矢量g和地球自转角速度矢量wie在地理坐标系（初始对准参考坐标系）的分量准确已知，分别如
+
+下：
+
+![image-20210513230438704](images/image-20210513230438704.png)
+
+其中，L，g和wie分别表示当地纬度，重力加速度大小和地球自转角速率大小，且记地球自转角速度的北向分量![image-20210514092705875](images/image-20210514092705875.png)和
+
+天向分量![image-20210514092721910](images/image-20210514092721910.png)。
+
+*（3）粗对准*
+
+a.解析粗对准：
+
+![image-20210514104215450](images/image-20210514104215450.png)
+
+![image-20210514104153894](images/image-20210514104153894.png)
+
+![image-20210514104406127](images/image-20210514104406127.png)
+
+代码：
+
+```matlab
+function [att, qnb, Cnb, eb, db] = alignsb(imu, pos)
+% SINS coarse align on static base.
+% 静止状态下粗对准
+% Prototype: [att, qnb] = alignsb(imu, pos)
+% Inputs: imu - SIMU data IMU数据
+%         pos - initial position 初始位置
+% Outputs: att, qnb - attitude align results Euler angles & quaternion  姿态对准结果（欧拉角&四元数）
+%          eb, db - gyro drift & acc bias test  陀螺仪和加速度计零偏   
+global glv
+    wbib = mean(imu(:,1:3),1)'; fbsf = mean(imu(:,4:6),1)';
+    lat = asin(wbib'*fbsf/norm(wbib)/norm(fbsf)); % latitude determing via sensor
+    if nargin<2     % pos not given
+        pos = lat;
+    end
+    if length(pos)==1
+        pos = [pos; 0; 0];
+    end
+    eth = earth(pos);
+    [qnb, att] = dv2atti(eth.gn, eth.wnie, -fbsf, wbib);
+    if nargin<2
+        resdisp('Coarse align resusts (att,lat_estimated/arcdeg)', ...
+            [att; lat]/glv.deg);
+    else
+        resdisp('Coarse align resusts (att,lat_estimated,lat_real/arcdeg)', ...
+            [att; lat; pos(1)]/glv.deg);
+    end
+% 17/05/2017
+    wb = wbib/diff(imu(1:2,end));
+    fb = fbsf/diff(imu(1:2,end));
+    Cnb = a2mat(att);
+    wb0 = Cnb'*eth.wnie; gb0 = Cnb'*eth.gn;
+    eb = wb - wb0;  db = fb + gb0;
+```
+
+设定初始对准的仿真数据：
+
+```matlab
+glvs 初始化全局变量
+ts = 0.1;   % sampling interval 采样间隔
+T = 1000; %仿真时间
+avp0 = avpset([0;0;0], [0;0;0], [30;108;380]); %初始姿态，速度，位置
+imuerr = imuerrset(0.01, 100, 0.001, 1); %设定IMU器件误差
+imu = imustatic(avp0, ts, T, imuerr);   %IMU simulation
+davp = avpseterr([-30;30;30], [0.01;0.01;0.01]*0, [1;1;1]*0); %只存在初始姿态误差，速度以及位置误差为零
+avp = avpadderr(avp0, davp);
+```
+
+解析粗对准实现：
+
+```matlab
+attsb = alignsb(imu, avp(7:9));
+phi = [aa2phi(attsb,[0;0;0]), [[-imuerr.db(2);imuerr.db(1)]/glv.g0;-imuerr.eb(1)/(cos(avp(7))*glv.wie)]]
+
+```
+
+结果如下：初始姿态角为[0 0 0]
+
+```matlab
+Coarse align resusts (att,lat_estimated,lat_real/arcdeg) :
+   0.005722179518591 %粗对准姿态角结果
+  -0.005724539707565
+   0.036244696380268
+  30.019283842674220 %估计纬度值
+  29.999999999999996 %真实纬度值
+```
+
+估计的姿态角误差：计算值&参考值
+
+```matlab
+
+phi =
+
+   1.0e-03 *
+
+  -0.099902471227402  -0.100000000000000
+   0.099880474021079   0.100000000000000
+  -0.632584298016697  -0.767698544700228
+```
+
+b.间接粗对准
+
+![image-20210514143334478](images/image-20210514143334478.png)
+
+![image-20210514143527356](images/image-20210514143527356.png)
+
+![image-20210514143641022](images/image-20210514143641022.png)
+
+代码
+
+```matlab
+function [att0, res] = aligni0(imu, pos, ts)
+% SINS initial align based on inertial frame method.
+%
+% Prototype: [att0, res] = aligni0(imu, pos, ts)
+% Inputs: imu - IMU data %IMU数据
+%         pos - position %位置
+%         ts - IMU sampling interval %IMU采样间隔
+% Output: att0 - attitude align result %姿态对准结果
+%         res - some other paramters for debug
+global glv
+    if nargin<3,  ts = imu(2,7)-imu(1,7);  end
+    nn = 2; nts = nn*ts;  ratio = 1; % 0.995;
+    len = fix(length(imu)/nn)*nn;
+    eth = earth(pos);  lat = pos(1);  g0 = -eth.gn(3);
+    qib0b = [1; 0; 0; 0];
+    [vib0, vi0, pib0, pi0, vib0_1, vi0_1] = setvals(zeros(3,1));
+    [pib0k, pi0k, vi0k, vib0k, fi0k, fib0k, attk, attkv] = prealloc(len/nn, 3);
+    k0 = fix(5/ts); % exculde the first 5s
+    ki = timebar(nn, len, 'Initial align based on inertial frame.');
+    for k=1:nn:len-nn+1
+        wvm = imu(k:k+nn-1, 1:6);  kts = (k+nn-1)*ts;
+        [phim, dvbm] = cnscl(wvm);
+        fib0 = qmulv(qib0b, dvbm)/nts;   % f
+        vib0 = vib0 + fib0*nts;          % vel
+        pib0 = ratio*pib0 + (vib0_1+vib0)*nts/2;  vib0_1 = vib0; % pos
+%         fi0 = [eth.cl*cos(kts*glv.wie);eth.cl*sin(kts*glv.wie);eth.sl]*g0;
+%         vi0 = vi0 + fi0*nts;
+%         pi0 = ratio*pi0 + (vi0_1+vi0)*nts/2;      vi0_1 = vi0;
+        [fi0, vi0, pi0] = i0fvp(kts, lat);
+        qib0b = qupdt(qib0b, phim);  % qib0b updating
+        pib0k(ki,:) = pib0'; vib0k(ki,:) = vib0'; fib0k(ki,:) = fib0'; % recording
+        pi0k(ki,:) = pi0';   vi0k(ki,:) = vi0';   fi0k(ki,:) = fi0';
+        if k>k0
+            k1 = fix(ki/2);
+            swiet = sin(kts*glv.wie); cwiet = cos(kts*glv.wie);
+            Cni0 = [-swiet,cwiet,0; 
+                -eth.sl*cwiet,-eth.sl*swiet,eth.cl; 
+                eth.cl*cwiet,eth.cl*swiet,eth.sl];
+            qni0 = m2qua(Cni0);
+            qi0ib0 = dv2atti(vi0k(k1,:)', vi0, vib0k(k1,:)', vib0);
+            qnb = qmul(qmul(qni0,qi0ib0),qib0b);
+            attkv(ki,:) = q2att(qnb)';    % using vel
+            qi0ib0 = dv2atti(pi0k(k1,:)', pi0, pib0k(k1,:)', pib0);
+            qnb = qmul(qmul(qni0,qi0ib0),qib0b);
+            attk(ki,:) = q2att(qnb)';     % using pos
+       end
+       ki = timebar;
+    end
+    k0 = fix(k0/nn)+1;
+%     attk(1:k0,:) = repmat(attk(k0+1,:),k0,1);
+    Cni0 = [0,1,0; -eth.sl,0,eth.cl;  eth.cl,0,eth.sl];
+    att0 = q2att(qmul(m2qua(Cni0),qi0ib0));
+    attk(1:k0,:) = repmat(att0',k0,1);
+    attkv(1:k0,:) = repmat(attkv(k0+1,:),k0,1);
+    tk = imu(nn:nn:length(attk)*nn,7); attk(:,4) = tk; attkv(:,4) = tk;
+    res = varpack(lat, nts, vib0k, pib0k, fib0k, vi0k, pi0k, fi0k, attk, attkv, att0); 
+    att0 = attk(end,1:3)';
+    resdisp('Initial align attitudes (arcdeg)', att0/glv.deg);
+```
+
+*（4）精对准*
+
+​        经过粗对准阶段，捷联惯导获得了粗略的姿态矩阵，获得了粗略的地理导航系指向，但是与真实地理坐标系相比往往还存
+
+在一定的失准角误差，通常水平失准角可达数![image-20210517095947833](images/image-20210517095947833.png)，而方位失准角![image-20210517100300664](images/image-20210517100300664.png)，若直接进入后续的纯惯性导航，导航误差将迅速发散，
+
+因此，需要进一步地精对准，尽量减小失准角误差。
+
+​        SINS静基座初始对准仿真可以分为四个步骤：
+
+![image-20210518224303684](images/image-20210518224303684.png)
+
+a.alignvn.m以速度为量测的Kalman精对准
+
+​       静基座下，捷联惯导更新解算即为速度误差，将其作为观测量，同时也是测量误差，利用Kalman量测方程完成对失准角的
+
+估计。
+
+姿态更新算法微分方程：
+
+![image-20210517103836394](images/image-20210517103836394.png)
+
+令上式中![image-20210517104011214](images/image-20210517104011214.png)，得到简化姿态算法：
+
+![image-20210517104431381](images/image-20210517104431381.png)
+
+惯导比力方程：
+
+![image-20210517104606530](images/image-20210517104606530.png)
+
+令![image-20210517104753399](images/image-20210517104753399.png)，得到简化速度算法：
+
+![image-20210517104825018](images/image-20210517104825018.png)
+
+捷联惯导姿态误差微分方程：
+
+![image-20210517105033897](images/image-20210517105033897.png)
+
+上式简化得：
+
+![image-20210517105630526](images/image-20210517105630526.png)
+
+捷联惯导速度误差微分方程：
+
+![image-20210517110047543](images/image-20210517110047543.png)
+
+上式简化得：
+
+![image-20210517110215901](images/image-20210517110215901.png)
+
+其中
+
+![image-20210517110652417](images/image-20210517110652417.png)
+
+![](images/image-20210517110708013.png)为等效陀螺仪的随机常值漂移，在静基座下姿态矩阵![image-20210517110846770](images/image-20210517110846770.png)近似为常值，若![](images/image-20210517111319565.png)为常值，则![image-20210517111723859](images/image-20210517111723859.png)也为常值;![image-20210517111752983](images/image-20210517111752983.png)
+
+为等效加速度计随机常值零偏，视为常值;![image-20210517111959148](images/image-20210517111959148.png)为姿态矩阵![image-20210517112221049](images/image-20210517112221049.png)中的元素。
+
+​        简化后的微分方程可得：
+
+![image-20210517112503670](images/image-20210517112503670.png)
+
+​      从上式可以看出天向速度误差对失准角估计不会有任何作用。基于上式，并将陀螺随机常值漂移和加速度计随机常值零偏扩
+
+充为状态，建立初始对准状态空间模型如下：
+
+![image-20210517143149611](images/image-20210517143149611.png)
+
+其中，
+
+![image-20210517143633566](images/image-20210517143633566.png)
+
+![image-20210517143651129](images/image-20210517143651129.png)
+
+![image-20210517143708215](images/image-20210517143708215.png)
+
+
+
+代码：
+
+```matlab
+function [att0, attk, xkpk] = alignvn(imu, qnb, pos, phi0, imuerr, wvn, ts)
+% SINS initial align uses Kalman filter with vn as measurement.速度误差作为观测量
+% Kalman filter states: 
+%    [phiE,phiN,phiU, dvE,dvN,dvU, ebx,eby,ebz, dbx,dby,dbz]'.
+%
+% Prototype: [att0, attk, xkpk] = alignvn(imu, qnb, pos, phi0, imuerr, wvn, ts)
+% Inputs: imu - IMU data IMU数据
+%         qnb - coarse attitude quaternion 粗对准姿态四元数
+%         pos - position 位置
+%         phi0 - initial misalignment angles estimation 初始失准角估计
+%         imuerr - IMU error setting IMU误差设定
+%         wvn - velocity measurement noise (3x1 vector) 速度量测误差
+%         ts - IMU sampling interval IMU采样频率
+% Output: att0 - attitude align result 姿态对准结果
+%         attk, xkpk - for debug
+%
+% Example:
+%	avp0 = avpset([0;0;0], zeros(3,1), glv.pos0);
+%	imu = imustatic(avp0, 1, 300, imuerr);
+%	phi = [.5; .5; 5]*glv.deg;
+%	imuerr = imuerrset(0.03, 100, 0.001, 10);
+%	wvn = [0.01; 0.01; 0.01];
+%	[att0, attk, xkpk] = alignvn(imu, avp0(1:3)', avp0(7:9)', phi, imuerr, wvn);
+global glv
+    if nargin<7,  ts = imu(2,7)-imu(1,7);  end
+    if length(qnb)==3, qnb=a2qua(qnb); end  %if input qnb is Eular angles.
+    nn = 2; nts = nn*ts;
+    len = fix(length(imu)/nn)*nn;
+    eth = earth(pos); vn = zeros(3,1); Cnn = rv2m(-eth.wnie*nts/2);
+    kf = avnkfinit(nts, pos, phi0, imuerr, wvn);
+    [attk, xkpk] = prealloc(fix(len/nn), 4, 2*kf.n);
+    ki = timebar(nn, len, 'Initial align using vn as meas.');
+    for k=1:nn:len-nn+1
+        wvm = imu(k:k+nn-1,1:6);
+        [phim, dvbm] = cnscl(wvm);
+        Cnb = q2mat(qnb);
+        dvn = Cnn*Cnb*dvbm;
+        vn = vn + dvn + eth.gn*nts;
+        %qnb = qupdt(qnb, phim-Cnb'*eth.wnin*nts);
+        qnb = qupdt2(qnb, phim, eth.wnin*nts);
+        Cnbts = Cnb*nts;
+        kf.Phikk_1(4:6,1:3) = askew(dvn);
+            kf.Phikk_1(1:3,7:9) = -Cnbts; kf.Phikk_1(4:6,10:12) = Cnbts;
+        kf = kfupdate(kf, vn);
+        qnb = qdelphi(qnb, 0.1*kf.xk(1:3)); kf.xk(1:3) = 0.9*kf.xk(1:3);
+        vn = vn-0.1*kf.xk(4:6);  kf.xk(4:6) = 0.9*kf.xk(4:6);
+        attk(ki,:) = [q2att(qnb)',imu(k+nn-1,end)];
+        xkpk(ki,:) = [kf.xk; diag(kf.Pxk)];
+        ki = timebar;
+    end
+    attk(ki:end,:) = []; xkpk(ki:end,:) = [];
+    att0 = attk(end,1:3)';
+    resdisp('Initial align attitudes (arcdeg)', att0/glv.deg);
+    avnplot(nts, attk, xkpk);
+```
+
+![image-20210517154437690](images/image-20210517154437690.png)为不可观测状态，即水平加速度计常值零偏和东向陀螺常值漂移是不可观测的，因而其没有滤波效果。
+
+
+
+b.alignvfn.m以比力为量测的Kalman精对准
+
+​       静基座下，加速度计输出比力作为观测量，比力-速度误差方程为测量误差量。
+
+代码：
+
+```matlab
+function [att0, attk, xkpk] = alignfn(imu, qnb, pos, phi0, imuerr, ts)
+% SINS initial align uses Kalman filter with fn as measurement. 以比力为观测量
+% Kalman filter states: [phiE, phiN, phiU, eby, ebz]'.
+%
+% Prototype: [att0, attk, xkpk] = alignfn(imu, qnb, pos, phi0, imuerr, ts)
+% Inputs: imu - IMU data IMU数据
+%         qnb - coarse attitude quaternion (or att) 粗对准姿态
+%         pos - position 位置
+%         phi0 - initial misalignment angles estimation 初始失准角估计
+%         imuerr - IMU error setting IMU误差设定
+%         ts - IMU sampling interval IMU采样间隔
+% Output: att0 - attitude align result 对准姿态结果
+global glv
+    if nargin<6,  ts = imu(2,7)-imu(1,7);  end
+    if length(qnb)==3, qnb=a2qua(qnb); end  %if input qnb is Eular angles.
+    nn = 2; nts = nn*ts;
+    len = fix(length(imu)/nn)*nn;
+    eth = earth(pos);  Cnn = rv2m(-eth.wnie*nts/2);
+    kf = afnkfinit(nts, pos, phi0, imuerr); 
+    [attk, xkpk] = prealloc(fix(len/nn), 3, 2*kf.n);
+    ki = timebar(nn, len, 'Initial align using fn as meas.');
+    for k=1:nn:len-nn+1
+        wvm = imu(k:k+nn-1, 1:6);
+        [phim, dvbm] = cnscl(wvm);
+        fn = Cnn*qmulv(qnb, dvbm/nts);
+        qnb = qupdt(qnb, phim-qmulv(qconj(qnb),eth.wnie)*nts);  % att updating
+        kf = kfupdate(kf, fn(1:2));
+        qnb = qdelphi(qnb, 0.1*kf.xk(1:3)); kf.xk(1:3) = 0.9*kf.xk(1:3); % feedback
+        attk(ki,:) = q2att(qnb)';
+        xkpk(ki,:) = [kf.xk; diag(kf.Pxk)];
+        ki = timebar;
+    end
+    attk(ki:end,:) = []; xkpk(ki:end,:) = [];
+    att0 = attk(end,:)';
+    resdisp('Initial align attitudes (arcdeg)', att0/glv.deg);
+    afnplot(nts, attk, xkpk);
+
+function kf = afnkfinit(nts, pos, phi0, imuerr)
+    eth = earth(pos);
+    kf = []; kf.s = 1; kf.nts = nts;
+    kf.Qk = diag([imuerr.web; 0;0])^2*nts;
+	kf.Rk = diag(imuerr.wdb(1:2)/sqrt(nts))^2;
+	kf.Pxk = diag([phi0; imuerr.eb(2:3)])^2;
+	wN = eth.wnie(2); wU = eth.wnie(3); g = -eth.gn(3);
+	Ft = [  0   wU -wN   0   0 
+           -wU  0   0   -1   0 
+            wN  0   0    0  -1 
+            zeros(2,5)          ];
+    kf.Phikk_1 = eye(5)+Ft*nts;
+    kf.Hk = [ 0  -g  0  0  0
+              g   0  0  0  0 ];
+    [kf.m, kf.n] = size(kf.Hk);
+    kf.I = eye(kf.n);
+    kf.xk = zeros(kf.n, 1);
+    kf.adaptive = 0;
+    kf.fading = 1;
+    kf.Gammak = 1;
+    kf.xconstrain = 0;
+    kf.pconstrain = 0;
+
+function afnplot(ts, attk, xkpk)
+global glv
+    t = (1:length(attk))'*ts;
+    myfigure;
+	subplot(321); plot(t, attk(:,1:2)/glv.deg); xygo('pr');
+	subplot(323); plot(t, attk(:,3)/glv.deg); xygo('y');
+	subplot(325), plot(t, xkpk(:,4:5)/glv.dph); xygo('ebyz');
+	subplot(322); plot(t, sqrt(xkpk(:,6:7))/glv.min); xygo('phiEN');
+	subplot(324); plot(t, sqrt(xkpk(:,8))/glv.min); xygo('phiU');
+	subplot(326), plot(t, sqrt(xkpk(:,9:10))/glv.dph); xygo('ebyz');
+```
+
+*结果分析：*
+
+表格以度为单位：
+
+![image-20210517161735322](images/image-20210517161735322.png)
+
+![image-20210517162611879](images/image-20210517162611879.png)
+
+![image-20210517165009753](images/image-20210517165009753.png)
+
+![image-20210517165037925](images/image-20210517165037925.png)
+
+天向陀螺的零偏基本估计不出来。
 
 *3,轨迹发生器*
 
-4,*Psins代码常用子函数解析*
+*（1）定义：*        
+
+​       轨迹发生器依据设定的航迹生成惯性器件信息源（比力和角速度），并给出相应航迹点的航行参数（姿态，速度，以及位
+
+置）。得到的比力以及角速度作为捷联算法的数据输入，经过捷联算法解算后将其得到的结果和之前的航行参数进行对比。
+
+​       轨迹发生器的方法是根据设定的航行运行状态解算一组航迹微分方程组，通常利用计算求解该微分方程组的数值解，数值解
+
+法中常用的是四阶龙格-库塔法。
+
+*（2）相关坐标系:*
+
+
+
+*4,惯性解算*
+
+（1）静态纯惯性导航：
+
+*代码：*
+
+```matlab
+% Long-time SINS pure inertial navigation simulation on static base.
+% 长时间静基座纯惯性导航
+glvs
+T = 24*60*60;  % total simulation time length 总的仿真时长
+[nn, ts, nts] = nnts(4, 1);
+avp0 = avpset([0;0;0], [0;0;0], glv.pos0); % 设置初始姿态，速度，位置
+imuerr = imuerrset(0.01, 10, 0.001, 0.2); % 设定IMU器件误差
+imu = imustatic(avp0, ts, T, imuerr);   % SIMU simulation IMU数据包含比力和角速度 
+davp0 = avpseterr([-10;10;3], [0.01;0.01;0.01], [10;10;10]);  % 初始姿态，速度，位置误差 
+avp00 = avpadderr(avp0, davp0); % 包含误差的初始姿态，速度以及位置
+avp = inspure(imu, avp00, avp0(9));  % pure inertial navigation 纯惯性导航
+avperr = avpcmp(avp, avp0); % 和理想值比较
+inserrplot(avperr);% 图
+```
+
+*实验结果：*
+
+​              *利用Kalman估计的天向加速度计零偏为：*
+
+![image-20210519144316063](images/image-20210519144316063.png)
+
+​              *纯惯性解算:*
+
+![image-20210519144622692](images/image-20210519144622692.png)
+
+​              *纯惯性解算和参考真值的误差:*
+
+![image-20210519144739492](images/image-20210519144739492.png)
+
+*结果分析：*
+
+休拉调谐原理：
+
+​        在运载体上确定出地垂线后即可确定出运载体的姿态，因此，在导航系统中确定地垂线是一项重要的技术。
+
+​        在静止或匀速直线运动条件下，地垂线可以用单摆等方法确定出来。当运载体具有加速度时，单摆不能正确指示地垂线，
+
+而且加速度越大，单摆偏离地垂线越严重。
+
+​        德国科学家休拉发现当单摆的无阻尼振荡周期为84.4分钟时，指示垂线的精度不受加速度的影响。1923年休拉发表了论文
+
+阐述这一原理，即休拉调谐原理。
+
+  
+
+经度明显发散振荡
+
+（2）动态纯惯性导航：
+
+*5,轨迹发生器*
+
+*6,Psins代码常用子函数解析*
 
